@@ -861,6 +861,8 @@ class Model(interface.Model):
         super(Model, self)._add_constraints(constraints, sloppy=sloppy)
 
         linear_constraints = dict(lin_expr=[], senses=[], rhs=[], range_values=[], names=[])
+        quadratic_constraints = dict(lin_expr=[], quad_expr=[], sense=[], rhs=[], name=[])
+        #lin_expr=None, quad_expr=None, sense='L', rhs=0.0, name=''
         for constraint in constraints:
             constraint._problem = None  # This needs to be done in order to not trigger constraint._get_expression()
             if constraint.is_Linear:
@@ -888,14 +890,52 @@ class Model(interface.Model):
                             lin_expr=cplex.SparsePair(ind=indices, val=values), sense=sense, rhs=rhs,
                             name=constraint.name,
                             indvar=constraint.indicator_variable.name, complemented=abs(constraint.active_when) - 1)
-
+            ##TODO implement quadratic cons here
             elif constraint.is_Quadratic:
-                raise NotImplementedError('Quadratic constraints (like %s) are not supported yet.' % constraint)
+                offset, linear_coefficients, quadratic_coefficients = parse_optimization_expression(constraint, quadratic=True, expression=constraint.expression)
+                
+                sense, rhs, _ = _constraint_lb_and_ub_to_cplex_sense_rhs_and_range_value(
+                    constraint.lb,
+                    constraint.ub
+                )
+                lin_indices = [var.name for var in linear_coefficients]
+                lin_values = [float(val) for val in linear_coefficients.values()]
+                
+                #Unpack quadratic variables
+                quad_indices_1 = []
+                quad_indices_2 = []
+                quad_indices = [list(var)[0].name for var in quadratic_coefficients]
+                for var_set in quadratic_coefficients.keys():
+                    var_list = list(var_set)
+                    # If x1*x2, a bit of overkill at the moment, since such problems usually nonconvex
+                    if len(var_list) == 2: 
+                        quad_indices_1.append(var_list[0].name)
+                        quad_indices_2.append(var_list[1].name)
+                    # If x1**2
+                    elif len(var_list) == 1: 
+                        quad_indices_1.append(var_list[0].name)
+                        quad_indices_2.append(var_list[0].name)
+                    #Which error to raise?
+                    # else:
+                    #     RaiseError 
+                quad_values = [float(val) for val in quadratic_coefficients.values()]
+                
+                quadratic_constraints['lin_expr'].append(cplex.SparsePair(ind=lin_indices, val=lin_values))
+                quadratic_constraints['quad_expr'].append(cplex.SparseTriple(ind1=quad_indices_1, ind2=quad_indices_2, val=quad_values))
+                quadratic_constraints['sense'].append(sense)
+                quadratic_constraints['rhs'].append(rhs)
+                quadratic_constraints['name'].append(constraint.name)
             else:
                 raise ValueError(
                     "CPLEX only supports linear or quadratic constraints. %s is neither linear nor quadratic." % constraint)
             constraint.problem = self
         self.problem.linear_constraints.add(**linear_constraints)
+        
+        #Cplex can not unpack quadratic_constraints the same way as linear_constraints
+        #So we unpack constraints ourselves here
+        for i in range(len(quadratic_constraints['quad_expr']) ):
+            quadratic_constraint = {key:value[i] for key, value in quadratic_constraints.items()}
+            self.problem.quadratic_constraints.add(**quadratic_constraint)
 
     def _remove_constraints(self, constraints):
         super(Model, self)._remove_constraints(constraints)
@@ -937,3 +977,32 @@ class Model(interface.Model):
             all_names = self.problem.variables.get_names()
             indices = {n: i for i, n in enumerate(all_names) if n in name_set}
             return [indices[n] for n in names]
+
+if __name__ == '__main__':
+    #https://minlp.com/mat-bar-example3
+    x1 = Variable('x1', lb=1,ub=1e5)
+    x2 = Variable('x2', lb=1,ub=1e5)
+    # x3 = Variable('x3', lb=0,ub=1e5)
+    # c1 = Constraint(x1  + x2 + x3, ub=100)
+    # c1 = Constraint(5*x1**2 + x3**2 + 10*x2**2, ub=100)
+    # c1 = Constraint(2*x1 + x2, lb=5, ub=5)
+    c2 = Constraint( 5*x1*x2, lb=1, ub=100)
+    # c2 = Constraint(10 * x1 + 4 * x2 + 5 * x3, ub=600)
+    # c3 = Constraint(2 * x1 + 2 * x2 + 6 * x3, ub=300)
+    model = Model(name='Simple model')
+    model._initialize_problem()
+    # model.problem.parameters.optimalitytarget.set(2)
+                # self.problem.parameters.preprocessing.qtolin.set(-1)
+            # self.problem.parameters.optimalitytarget.set(3)
+    obj = Objective(0.5*x1**2 + 0.5*x2**2 , direction='min')
+    # obj = Objective(x1 + x2 , direction='max')
+
+    # obj = Objective(x1 ** 2 + x2 ** 2 - 10 * x1, direction="max")
+    # obj.problem = 
+    model.objective = obj
+    model.add([c2])
+    
+    model.update()
+    model.optimize()
+    for var in model.variables:
+          print(var.name, var.primal)
